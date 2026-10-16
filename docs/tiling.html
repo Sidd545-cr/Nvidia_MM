@@ -1,0 +1,482 @@
+<title>Shared-Memory Tiling Stepper</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one teaching column. Sticky controls; code + explanation; global memory (A, B, C); shared memory (As, Bs) beside the selected thread's running sum and a read counter. */
+:root {
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --ink: #17212b;
+  --muted: #5b6875;
+  --line: #d5dce3;
+  --cell: #e9edf1;
+  --band: #dfe6ee;
+  --tile: #c9d8f6;
+  --now: #2459d6;
+  --now-ink: #ffffff;
+  --sel: #d98a00;
+  --sel-ink: #1b1200;
+  --out: #eef1f4;
+  --hatch: #c7cfd8;
+  --good: #1e7f4a;
+  --good-bg: #e2f3e9;
+  --code-bg: #eef1f5;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161c; --panel: #19202a; --ink: #e4e9ee; --muted: #9aa7b4; --line: #2c3743;
+    --cell: #232c37; --band: #29333f; --tile: #2c4170; --now: #5b8cff; --now-ink: #0b1220;
+    --sel: #f0a830; --sel-ink: #1b1200; --out: #161c24; --hatch: #2f3a47;
+    --good: #5fd08f; --good-bg: #173326; --code-bg: #141a22; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161c; --panel: #19202a; --ink: #e4e9ee; --muted: #9aa7b4; --line: #2c3743;
+  --cell: #232c37; --band: #29333f; --tile: #2c4170; --now: #5b8cff; --now-ink: #0b1220;
+  --sel: #f0a830; --sel-ink: #1b1200; --out: #161c24; --hatch: #2f3a47;
+  --good: #5fd08f; --good-bg: #173326; --code-bg: #141a22; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 56px;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+.wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(1.7rem, 4vw, 2.4rem); font-weight: 800; }
+h2 { font-size: 1.2rem; font-weight: 700; }
+h3 { font-size: 1rem; font-weight: 700; }
+p { margin: 0; max-width: 70ch; }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+.lede { color: var(--muted); font-size: 1.02rem; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+
+.controls {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; display: flex; flex-wrap: wrap; gap: 14px 26px; align-items: flex-end;
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+}
+.ctl { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.lbl { font-size: 0.72rem; font-family: var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; flex-wrap: wrap; }
+.seg button { font: 500 0.86rem var(--font-body); color: var(--ink); background: transparent; border: 0; padding: 7px 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--now); color: var(--now-ink); }
+.row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+input[type=range] { width: 200px; accent-color: var(--now); }
+.btn { font: 600 0.84rem var(--font-body); background: var(--code-bg); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 6px 11px; cursor: pointer; }
+button:focus-visible, input:focus-visible, .cell.click:focus-visible { outline: 2px solid var(--now); outline-offset: 2px; }
+.stepname { font: 600 0.9rem var(--font-mono); font-variant-numeric: tabular-nums; }
+.keys { font-size: 0.8rem; color: var(--muted); align-self: center; }
+kbd { font: 600 0.76rem var(--font-mono); background: var(--code-bg); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--ink); }
+
+.top { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 820px) { .top { grid-template-columns: 1fr; } }
+.code {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px; margin: 0;
+  padding: 12px 0; font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.75; overflow-x: auto;
+}
+.code div { padding: 0 14px; white-space: pre; border-left: 3px solid transparent; }
+.code div.on { background: var(--tile); border-left-color: var(--now); }
+.code .cm { color: var(--muted); }
+.explain { display: flex; flex-direction: column; gap: 8px; border-left: 3px solid var(--now); padding: 2px 0 2px 14px; }
+.explain.sync { border-left-color: var(--sel); }
+
+.section-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 16px; }
+.mats { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
+.mat { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; min-width: 0; max-width: 100%; }
+.mat .sub { font-size: 0.72rem; font-family: var(--font-mono); letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); }
+.mat .scroll { overflow-x: auto; padding-bottom: 6px; }
+.grid { display: flex; flex-direction: column; gap: 2px; width: max-content; }
+.grow { display: flex; gap: 2px; }
+.gap-col { width: 4px; flex: none; }
+.gap-row { height: 4px; }
+.cell {
+  width: 22px; height: 22px; flex: none; border-radius: 3px; background: var(--cell);
+  display: grid; place-items: center; font: 500 0.52rem var(--font-mono); color: var(--muted);
+  transition: background-color 0.15s, color 0.15s;
+}
+.cell.band { background: var(--band); }
+.cell.tile { background: var(--tile); color: var(--ink); }
+.cell.now { background: var(--now); color: var(--now-ink); font-weight: 600; }
+.cell.sel { background: var(--sel); color: var(--sel-ink); font-weight: 700; }
+.cell.ref { box-shadow: inset 0 0 0 2px var(--sel); }
+.cell.out { background: repeating-linear-gradient(45deg, var(--out) 0 3px, var(--hatch) 3px 5px); color: var(--muted); }
+.cell.click { cursor: pointer; }
+.big .cell { width: 40px; height: 40px; font-size: 0.66rem; }
+
+.lower { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 820px) { .lower { grid-template-columns: 1fr; } }
+.side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.terms { display: flex; flex-wrap: wrap; gap: 6px; }
+.term { font: 500 0.74rem var(--font-mono); padding: 2px 7px; border-radius: 5px; background: var(--code-bg); border: 1px solid var(--line); }
+.term.p0 { border-color: var(--now); }
+.term.zero { opacity: 0.6; border-style: dashed; }
+.term.latest { background: var(--sel); color: var(--sel-ink); border-color: var(--sel); }
+.stats { display: grid; grid-template-columns: auto auto; gap: 4px 16px; font-size: 0.88rem; width: max-content; max-width: 100%; }
+.stats .n { font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; font-weight: 600; }
+.badge { font: 600 0.76rem var(--font-mono); padding: 3px 9px; border-radius: 999px; color: var(--good); background: var(--good-bg); width: max-content; max-width: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px 16px; font-size: 0.8rem; color: var(--muted); align-items: center; }
+.sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -2px; margin-right: 6px; }
+.note { font-size: 0.86rem; color: var(--muted); }
+.takeaways { display: flex; flex-direction: column; gap: 10px; }
+.takeaways p { padding-left: 14px; border-left: 2px solid var(--line); }
+@media (prefers-reduced-motion: reduce) { .cell { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header style="display:flex;flex-direction:column;gap:10px">
+    <div class="eyebrow">Week 2 · tiled matmul kernel · TILE = 4 in this diagram</div>
+    <h1>How one thread block computes its tile of C</h1>
+    <p class="lede">The block loads a TILE×TILE piece of A and of B into shared memory, waits, does TILE multiply-adds per thread from shared memory, waits again, and moves one tile along the inner dimension. Step through it with the arrow keys. Click any cell of C to pick a different thread or block.</p>
+  </header>
+
+  <section class="controls" aria-label="Diagram controls">
+    <div class="ctl">
+      <span class="lbl" id="lbl-size">Matrix sizes (M×N×L)</span>
+      <div class="seg" role="group" aria-labelledby="lbl-size">
+        <button id="sz-div" type="button" aria-pressed="true">8×12×8 (tile multiples)</button>
+        <button id="sz-irr" type="button" aria-pressed="false">7×10×6 (irregular)</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label class="lbl" for="step">Step</label>
+      <div class="row">
+        <button class="btn" id="prev" type="button" aria-label="Previous step">◀</button>
+        <input id="step" type="range" min="0" max="0" value="0">
+        <button class="btn" id="next" type="button" aria-label="Next step">▶</button>
+        <button class="btn" id="play" type="button">Play</button>
+      </div>
+    </div>
+    <div class="ctl" style="min-width:12ch">
+      <span class="lbl">Now</span>
+      <span class="stepname" id="stepname"></span>
+    </div>
+    <div class="keys"><kbd>←</kbd> <kbd>→</kbd> step</div>
+  </section>
+
+  <div class="top">
+    <div class="code" id="code" aria-label="Kernel code, current line highlighted"></div>
+    <div class="explain" id="explain"></div>
+  </div>
+
+  <div class="legend">
+    <span><span class="sw" style="background:var(--tile)"></span>current tile</span>
+    <span><span class="sw" style="background:var(--now)"></span>accessed by the block this step</span>
+    <span><span class="sw" style="background:var(--sel)"></span>selected thread</span>
+    <span><span class="sw" style="background:repeating-linear-gradient(45deg,var(--out) 0 3px,var(--hatch) 3px 5px)"></span>outside the matrix (loaded as 0)</span>
+  </div>
+
+  <section style="display:flex;flex-direction:column;gap:10px">
+    <div class="section-head"><h2>Global memory</h2><span class="note" id="gnote"></span></div>
+    <div class="mats" id="global"></div>
+  </section>
+
+  <section style="display:flex;flex-direction:column;gap:10px">
+    <div class="section-head"><h2>Shared memory of the selected block</h2><span class="note">Each cell shows which element of A or B it holds (row,col).</span></div>
+    <div class="lower">
+      <div class="mats" id="shared"></div>
+      <div class="side">
+        <div class="card" id="sumcard"></div>
+        <div class="card" id="stats"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="takeaways">
+    <h2>What to take away</h2>
+    <p><strong>Reuse.</strong> In the naive kernel every thread reads its own row of A and column of B from global memory, so each element of A is fetched once per thread that needs it. Here each element is fetched from global memory once per block and then read TILE times from shared memory. Global reads drop by a factor of TILE, which the counter shows (4× here, 16× or 32× with real tile sizes).</p>
+    <p><strong>Two barriers per phase.</strong> The first <code>__syncthreads()</code> stops anyone reading the tile before every thread has written its element. The second stops anyone overwriting the tile with the next phase before every thread has finished reading it.</p>
+    <p><strong>Edges.</strong> When M, N or L is not a multiple of TILE, the last tiles stick out of the matrix. Those slots are filled with 0, so the extra multiply-adds add nothing, and threads outside M×L compute but skip the final store. Switch to the irregular size to see both.</p>
+    <p><strong>Still coalesced.</strong> During a load, neighbouring <code>tx</code> read neighbouring columns of one row of A and of B, the same pattern as the naive kernel's B reads.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  const T = 4;
+  const SIZES = { div: { M: 8, N: 12, L: 8 }, irr: { M: 7, N: 10, L: 6 } };
+  const st = { size: "div", s: 0, by: 0, bx: 1, ty: 1, tx: 1, timer: null };
+  const $ = (id) => document.getElementById(id);
+  const ceil = (a) => Math.ceil(a / T);
+
+  function dims() {
+    const d = SIZES[st.size];
+    return { ...d, P: ceil(d.N), BY: ceil(d.M), BX: ceil(d.L) };
+  }
+  function steps() {
+    const { P } = dims(), a = [];
+    for (let p = 0; p < P; p++) {
+      a.push({ p, kind: "load" }, { p, kind: "sync1" });
+      for (let k = 0; k < T; k++) a.push({ p, kind: "k", k });
+      a.push({ p, kind: "sync2" });
+    }
+    a.push({ p: P - 1, kind: "store" });
+    return a;
+  }
+
+  const CODE = [
+    ["row = blockIdx.y*TILE + ty;  col = blockIdx.x*TILE + tx;", null],
+    ["float sum = 0.0f;", null],
+    ["for (int p = 0; p < numPhases; p++) {", null],
+    ["    int ac = p*TILE + tx, br = p*TILE + ty;", "load"],
+    ["    As[ty][tx] = (row < M && ac < N) ? A[row*N + ac] : 0;", "load"],
+    ["    Bs[ty][tx] = (br < N && col < L) ? B[br*L + col] : 0;", "load"],
+    ["    __syncthreads();      <span class='cm'>// tile fully written</span>", "sync1"],
+    ["    for (int k = 0; k < TILE; k++)", "k"],
+    ["        sum += As[ty][k] * Bs[k][tx];", "k"],
+    ["    __syncthreads();      <span class='cm'>// tile fully read</span>", "sync2"],
+    ["}", null],
+    ["if (row < M && col < L) C[row*L + col] = sum;", "store"],
+  ];
+
+  function stepName(c) {
+    const P = dims().P;
+    const ph = `phase ${c.p + 1}/${P}`;
+    if (c.kind === "load") return `${ph} · load`;
+    if (c.kind === "sync1") return `${ph} · sync`;
+    if (c.kind === "k") return `${ph} · k=${c.k}`;
+    if (c.kind === "sync2") return `${ph} · sync`;
+    return "store";
+  }
+
+  // which A/B element shared slot [i][j] holds in phase p for the selected block
+  function srcA(p, i, j) { return { r: st.by * T + i, c: p * T + j }; }
+  function srcB(p, i, j) { return { r: p * T + i, c: st.bx * T + j }; }
+
+  function renderGrid(host, rows, cols, fn, opts = {}) {
+    const g = document.createElement("div");
+    g.className = "grid" + (opts.big ? " big" : "");
+    for (let r = 0; r < rows; r++) {
+      if (r && r % T === 0 && !opts.big) g.appendChild(Object.assign(document.createElement("div"), { className: "gap-row" }));
+      const row = document.createElement("div");
+      row.className = "grow";
+      for (let c = 0; c < cols; c++) {
+        if (c && c % T === 0 && !opts.big) row.appendChild(Object.assign(document.createElement("div"), { className: "gap-col" }));
+        const d = document.createElement("div");
+        const o = fn(r, c);
+        d.className = "cell " + (o.cls || "");
+        d.textContent = o.text || "";
+        if (o.title) d.title = o.title;
+        if (o.onclick) {
+          d.classList.add("click"); d.tabIndex = 0; d.setAttribute("role", "button");
+          d.setAttribute("aria-label", o.title || "");
+          d.onclick = o.onclick;
+          d.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); o.onclick(); } };
+        }
+        row.appendChild(d);
+      }
+      g.appendChild(row);
+    }
+    host.appendChild(g);
+  }
+
+  function matCard(host, title, sub, build) {
+    const m = document.createElement("div");
+    m.className = "mat";
+    m.innerHTML = `<h3>${title}</h3><div class="sub">${sub}</div>`;
+    const sc = document.createElement("div");
+    sc.className = "scroll";
+    build(sc);
+    m.appendChild(sc);
+    host.appendChild(m);
+  }
+
+  function render() {
+    const D = dims(), S = steps();
+    st.s = Math.min(st.s, S.length - 1);
+    const cur = S[st.s];
+    const p = cur.p;
+    const row = st.by * T + st.ty, col = st.bx * T + st.tx;
+    const gk = cur.kind === "k" ? p * T + cur.k : -1;
+
+    $("step").max = S.length - 1;
+    $("step").value = st.s;
+    $("stepname").textContent = stepName(cur);
+    $("sz-div").setAttribute("aria-pressed", st.size === "div");
+    $("sz-irr").setAttribute("aria-pressed", st.size === "irr");
+
+    // code
+    $("code").innerHTML = CODE.map(([t, k]) => {
+      const on = k === cur.kind || (k === "sync1" && cur.kind === "sync1") || (k === "sync2" && cur.kind === "sync2");
+      return `<div class="${on ? "on" : ""}">${t}</div>`;
+    }).join("");
+
+    // explanation
+    const ex = $("explain");
+    ex.className = "explain" + (cur.kind.startsWith("sync") ? " sync" : "");
+    const zeroA = [...Array(T * T).keys()].some((n) => { const s = srcA(p, Math.floor(n / T), n % T); return s.r >= D.M || s.c >= D.N; });
+    const zeroB = [...Array(T * T).keys()].some((n) => { const s = srcB(p, Math.floor(n / T), n % T); return s.r >= D.N || s.c >= D.L; });
+    const sel = `thread (ty=${st.ty}, tx=${st.tx})`;
+    const outC = row >= D.M || col >= D.L;
+    const outNote = outC ? ` <strong>This thread owns C[${row}][${col}], which is outside the ${D.M}×${D.L} result</strong>: it still takes part in loading and computing, because the block needs its loads, but it never stores.` : "";
+    if (cur.kind === "load") {
+      const ar = row, ac = p * T + st.tx, br = p * T + st.ty;
+      const aIn = ar < D.M && ac < D.N, bIn = br < D.N && col < D.L;
+      const aTxt = aIn ? `copies A[${ar}][${ac}] into As[${st.ty}][${st.tx}]` : `writes 0 into As[${st.ty}][${st.tx}] (A[${ar}][${ac}] is outside A)`;
+      const bTxt = bIn ? `copies B[${br}][${col}] into Bs[${st.ty}][${st.tx}]` : `writes 0 into Bs[${st.ty}][${st.tx}] (B[${br}][${col}] is outside B)`;
+      ex.innerHTML = `<h3>Phase ${p + 1} of ${D.P}: load one tile of A and one of B</h3>
+        <p>All ${T * T} threads of block (${st.by}, ${st.bx}) each copy <strong>one</strong> element of A and <strong>one</strong> of B from global memory into shared memory. The ${sel} ${aTxt}, and ${bTxt}.${outNote}</p>
+        <p>Neighbouring <code>tx</code> read neighbouring columns of the same row, so both loads are coalesced.${zeroA || zeroB ? " Part of this tile lies outside the matrix: those slots are filled with 0 instead of being read." : ""}</p>`;
+    } else if (cur.kind === "sync1") {
+      ex.innerHTML = `<h3>__syncthreads(): wait until the tile is complete</h3>
+        <p>No thread may start multiplying until <strong>every</strong> thread has written its element. Without this barrier a fast warp could read As[${st.ty}][3] before the thread that loads it has run, and use a stale value from the previous phase.</p>`;
+    } else if (cur.kind === "k") {
+      ex.innerHTML = `<h3>Phase ${p + 1}, k = ${cur.k}: multiply from shared memory</h3>
+        <p>Every thread reads As[ty][${cur.k}] and Bs[${cur.k}][tx]. That is <strong>column ${cur.k} of As</strong> and <strong>row ${cur.k} of Bs</strong>, shown in blue. Each As value is used by all ${T} threads of its row in the block and each Bs value by all ${T} threads of its column: that is the reuse.</p>
+        <p>The ${sel} adds A[${row}][${gk}] · B[${gk}][${col}]${(() => {
+          const why = [];
+          if (row >= D.M || gk >= D.N) why.push(`A[${row}][${gk}] is outside A`);
+          if (gk >= D.N || col >= D.L) why.push(`B[${gk}][${col}] is outside B`);
+          return why.length ? `, which adds 0 because ${why.join(" and ")} and was loaded as 0` : "";
+        })()}. No global memory is touched in this step.${outNote}</p>`;
+    } else if (cur.kind === "sync2") {
+      ex.innerHTML = `<h3>__syncthreads(): wait until everyone has finished reading</h3>
+        <p>The next phase overwrites As and Bs. If one thread raced ahead and loaded the next tile while a slower thread was still at k = 2, that slower thread would multiply the wrong numbers.${p === D.P - 1 ? " This is the last phase, so here the barrier only costs a little time." : ""}</p>`;
+    } else {
+      const inside = row < D.M && col < D.L;
+      ex.innerHTML = `<h3>Store the result</h3>
+        <p>Each thread writes its finished sum to C once. ${inside ? `The ${sel} writes C[${row}][${col}].` : `The ${sel} owns C[${row}][${col}], which is outside the ${D.M}×${D.L} matrix, so the guard skips its store.`}</p>`;
+    }
+
+    // global matrices
+    const gl = $("global");
+    gl.innerHTML = "";
+    $("gnote").textContent = `Grid of ${D.BY}×${D.BX} blocks, each ${T}×${T} threads. Selected block (${st.by}, ${st.bx}).`;
+    const inBandA = (r) => Math.floor(r / T) === st.by;
+    const inBandB = (c) => Math.floor(c / T) === st.bx;
+
+    matCard(gl, `A (arr1) · ${D.M}×${D.N}`, "rows of this block × current phase", (h) =>
+      renderGrid(h, D.BY * T, D.P * T, (r, c) => {
+        const out = r >= D.M || c >= D.N;
+        const tile = inBandA(r) && Math.floor(c / T) === p && cur.kind !== "store";
+        let cls = out ? "out" : tile ? "tile" : inBandA(r) ? "band" : "";
+        if (!out && tile && cur.kind === "load") cls = "now";
+        if (cur.kind === "load" && r === row && c === p * T + st.tx && !out) cls = "sel";
+        if (cur.kind === "k" && r === row && c === gk) cls += " ref";
+        return { cls, title: out ? "outside A" : `A[${r}][${c}]` };
+      }));
+
+    matCard(gl, `B (arr2) · ${D.N}×${D.L}`, "current phase × columns of this block", (h) =>
+      renderGrid(h, D.P * T, D.BX * T, (r, c) => {
+        const out = r >= D.N || c >= D.L;
+        const tile = inBandB(c) && Math.floor(r / T) === p && cur.kind !== "store";
+        let cls = out ? "out" : tile ? "tile" : inBandB(c) ? "band" : "";
+        if (!out && tile && cur.kind === "load") cls = "now";
+        if (cur.kind === "load" && r === p * T + st.ty && c === col && !out) cls = "sel";
+        if (cur.kind === "k" && r === gk && c === col) cls += " ref";
+        return { cls, title: out ? "outside B" : `B[${r}][${c}]` };
+      }));
+
+    matCard(gl, `C (sol) · ${D.M}×${D.L}`, "click a cell to pick that thread", (h) =>
+      renderGrid(h, D.BY * T, D.BX * T, (r, c) => {
+        const out = r >= D.M || c >= D.L;
+        const mine = Math.floor(r / T) === st.by && Math.floor(c / T) === st.bx;
+        let cls = out ? "out" : mine ? "tile" : "";
+        if (mine && !out && cur.kind === "store") cls = "now";
+        if (r === row && c === col) cls = out ? "out ref" : "sel";
+        return {
+          cls, title: `${out ? "outside C, " : ""}C[${r}][${c}]: block (${Math.floor(r / T)}, ${Math.floor(c / T)}), thread (ty=${r % T}, tx=${c % T})`,
+          onclick: () => { st.by = Math.floor(r / T); st.bx = Math.floor(c / T); st.ty = r % T; st.tx = c % T; render(); },
+        };
+      }));
+
+    // shared memory
+    const sh = $("shared");
+    sh.innerHTML = "";
+    const filled = true; // a tile is present from the load step onwards
+    matCard(sh, "As (shared)", `holds A[row][p·${T}+j], phase ${p + 1}`, (h) =>
+      renderGrid(h, T, T, (i, j) => {
+        const s = srcA(p, i, j), zero = s.r >= D.M || s.c >= D.N;
+        let cls = zero ? "out" : "tile";
+        if (cur.kind === "load") cls = zero ? "out" : "now";
+        if (cur.kind === "k" && j === cur.k) cls = zero ? "out" : "now";
+        if ((cur.kind === "load" && i === st.ty && j === st.tx) || (cur.kind === "k" && i === st.ty && j === cur.k)) cls = zero ? "out ref" : "sel";
+        return { cls, text: filled ? (zero ? "0" : `${s.r},${s.c}`) : "", title: zero ? "zero-filled" : `A[${s.r}][${s.c}]` };
+      }, { big: true }));
+    matCard(sh, "Bs (shared)", `holds B[p·${T}+i][col], phase ${p + 1}`, (h) =>
+      renderGrid(h, T, T, (i, j) => {
+        const s = srcB(p, i, j), zero = s.r >= D.N || s.c >= D.L;
+        let cls = zero ? "out" : "tile";
+        if (cur.kind === "load") cls = zero ? "out" : "now";
+        if (cur.kind === "k" && i === cur.k) cls = zero ? "out" : "now";
+        if ((cur.kind === "load" && i === st.ty && j === st.tx) || (cur.kind === "k" && i === cur.k && j === st.tx)) cls = zero ? "out ref" : "sel";
+        return { cls, text: zero ? "0" : `${s.r},${s.c}`, title: zero ? "zero-filled" : `B[${s.r}][${s.c}]` };
+      }, { big: true }));
+
+    // selected thread's running sum
+    const terms = [];
+    S.forEach((x, idx) => {
+      if (x.kind !== "k" || idx > st.s) return;
+      const g = x.p * T + x.k;
+      const zero = g >= D.N || row >= D.M || col >= D.L;   // A or B side was zero-filled
+      terms.push(`<span class="term ${x.p % 2 ? "" : "p0"} ${zero ? "zero" : ""} ${idx === st.s ? "latest" : ""}" title="${zero ? "0: uses a zero-filled slot" : ""}">A${row},${g}·B${g},${col}</span>`);
+    });
+    const outside = row >= D.M || col >= D.L;
+    $("sumcard").innerHTML = `<h3>Thread (ty=${st.ty}, tx=${st.tx}) of block (${st.by}, ${st.bx})</h3>
+      <p class="note">Computes C[${row}][${col}]${outside ? " (outside the matrix: computed, never stored)" : ""}. Terms added so far (${terms.length} of ${D.P * T}); blue-outlined terms come from phases 1 and 3, dashed ones are 0 because they use a zero-filled slot:</p>
+      <div class="terms">${terms.join("") || '<span class="note">none yet: the first multiply happens at k = 0</span>'}</div>`;
+
+    // read counters for the selected block
+    let tiledGlobal = 0, shared = 0, naive = 0;
+    const activeThreads = [...Array(T * T).keys()].filter((n) => st.by * T + Math.floor(n / T) < D.M && st.bx * T + (n % T) < D.L).length;
+    S.forEach((x, idx) => {
+      if (idx > st.s) return;
+      if (x.kind === "load") {
+        for (let n = 0; n < T * T; n++) {
+          const a = srcA(x.p, Math.floor(n / T), n % T), b = srcB(x.p, Math.floor(n / T), n % T);
+          if (a.r < D.M && a.c < D.N) tiledGlobal++;
+          if (b.r < D.N && b.c < D.L) tiledGlobal++;
+        }
+      }
+      if (x.kind === "k") {
+        shared += 2 * T * T;
+        if (x.p * T + x.k < D.N) naive += 2 * activeThreads;
+      }
+    });
+    const ratio = tiledGlobal && naive ? (naive / tiledGlobal).toFixed(1) + "×" : "–";
+    $("stats").innerHTML = `<h3>Reads by this block so far</h3>
+      <div class="stats">
+        <span>Global reads, tiled kernel</span><span class="n">${tiledGlobal}</span>
+        <span>Shared-memory reads, tiled kernel</span><span class="n">${shared}</span>
+        <span>Global reads the naive kernel would need</span><span class="n">${naive}</span>
+      </div>
+      <span class="badge">${ratio === "–" ? "naive / tiled: shown after the first multiply" : `naive needs ${ratio} more global reads`}</span>`;
+  }
+
+  function stop() { if (st.timer) { clearInterval(st.timer); st.timer = null; $("play").textContent = "Play"; } }
+  function go(d) { const n = steps().length; st.s = (st.s + d + n) % n; render(); }
+
+  $("sz-div").onclick = () => { st.size = "div"; st.s = 0; clampSel(); render(); };
+  $("sz-irr").onclick = () => { st.size = "irr"; st.s = 0; clampSel(); render(); };
+  function clampSel() { const D = dims(); st.by = Math.min(st.by, D.BY - 1); st.bx = Math.min(st.bx, D.BX - 1); }
+  $("step").oninput = (e) => { stop(); st.s = +e.target.value; render(); };
+  $("prev").onclick = () => { stop(); go(-1); };
+  $("next").onclick = () => { stop(); go(1); };
+  $("play").onclick = () => {
+    if (st.timer) return stop();
+    $("play").textContent = "Pause";
+    st.timer = setInterval(() => go(1), 1000);
+  };
+  document.addEventListener("keydown", (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.target instanceof HTMLInputElement && e.target.type === "range") return;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault(); stop(); go(e.key === "ArrowRight" ? 1 : -1);
+    }
+  });
+
+  render();
+})();
+</script>

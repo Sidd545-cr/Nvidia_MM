@@ -1,0 +1,497 @@
+<title>Warp Memory Coalescing</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: a single teaching column; controls on top, three array panels (A, B, C) stacked, each showing the 2-D matrix and the same data as linear memory. */
+:root {
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --ink: #17212b;
+  --muted: #5b6875;
+  --line: #d5dce3;
+  --cell: #e9edf1;
+  --sector-a: #e9edf1;
+  --sector-b: #dde3ea;
+  --hit: #2459d6;
+  --hit-ink: #ffffff;
+  --trail: #9db5ee;
+  --good: #1e7f4a;
+  --good-bg: #e2f3e9;
+  --bad: #b8402c;
+  --bad-bg: #f8e4df;
+  --warn: #a96500;
+  --code-bg: #eef1f5;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161c; --panel: #19202a; --ink: #e4e9ee; --muted: #9aa7b4; --line: #2c3743;
+    --cell: #232c37; --sector-a: #232c37; --sector-b: #2b3542;
+    --hit: #5b8cff; --hit-ink: #0b1220; --trail: #34508f;
+    --good: #5fd08f; --good-bg: #173326; --bad: #ff8a72; --bad-bg: #3a201b; --warn: #f0b048;
+    --code-bg: #141a22; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161c; --panel: #19202a; --ink: #e4e9ee; --muted: #9aa7b4; --line: #2c3743;
+  --cell: #232c37; --sector-a: #232c37; --sector-b: #2b3542;
+  --hit: #5b8cff; --hit-ink: #0b1220; --trail: #34508f;
+  --good: #5fd08f; --good-bg: #173326; --bad: #ff8a72; --bad-bg: #3a201b; --warn: #f0b048;
+  --code-bg: #141a22; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 56px;
+}
+.wrap { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 22px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+h1 { font-size: clamp(1.7rem, 4vw, 2.4rem); font-weight: 800; }
+h2 { font-size: 1.25rem; font-weight: 700; }
+h3 { font-size: 1.05rem; font-weight: 700; }
+p { margin: 0; max-width: 68ch; }
+.lede { color: var(--muted); font-size: 1.02rem; }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+
+/* controls */
+.controls {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; display: flex; flex-wrap: wrap; gap: 16px 28px; align-items: flex-end;
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5;
+}
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+.ctl { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ctl label, .ctl .lbl { font-size: 0.75rem; font-family: var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; flex-wrap: wrap; }
+.seg button {
+  font: 500 0.88rem var(--font-body); color: var(--ink); background: transparent;
+  border: 0; padding: 7px 12px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--hit); color: var(--hit-ink); }
+.seg button:focus-visible, .btn:focus-visible, input[type=range]:focus-visible { outline: 2px solid var(--hit); outline-offset: 2px; }
+.steprow { display: flex; align-items: center; gap: 10px; }
+input[type=range] { width: 170px; accent-color: var(--hit); }
+.btn {
+  font: 600 0.85rem var(--font-body); background: var(--code-bg); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer;
+}
+.val { font-family: var(--font-mono); font-weight: 600; min-width: 2.5ch; font-variant-numeric: tabular-nums; }
+
+/* code */
+.code {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; font-family: var(--font-mono); font-size: 0.86rem; line-height: 1.7;
+  overflow-x: auto; white-space: pre; margin: 0;
+}
+.code .hl { background: var(--hit); color: var(--hit-ink); border-radius: 3px; padding: 0 3px; }
+.code .cm { color: var(--muted); }
+
+.explain {
+  border-left: 3px solid var(--hit); padding: 4px 0 4px 14px; display: flex; flex-direction: column; gap: 6px;
+}
+
+/* array panels */
+.panels { display: flex; flex-direction: column; gap: 16px; }
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0;
+}
+.panel-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; }
+.panel-head .expr { font-family: var(--font-mono); font-size: 0.9rem; color: var(--muted); }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font: 600 0.78rem var(--font-mono); padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+.badge.good { color: var(--good); background: var(--good-bg); }
+.badge.bad { color: var(--bad); background: var(--bad-bg); }
+.badge.neutral { color: var(--muted); background: var(--code-bg); }
+.panel-body { display: grid; grid-template-columns: auto 1fr; gap: 18px; align-items: start; }
+@media (max-width: 720px) { .panel-body { grid-template-columns: 1fr; } }
+.sub { font-size: 0.72rem; font-family: var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.scroll { overflow-x: auto; min-width: 0; padding-bottom: 14px; }
+
+.grid2d { display: grid; gap: 2px; }
+.c {
+  width: 26px; height: 26px; border-radius: 3px; background: var(--cell);
+  display: grid; place-items: center; font: 500 0.62rem var(--font-mono); color: var(--muted);
+  transition: background-color 0.18s, color 0.18s;
+}
+.c.trail { background: var(--trail); color: var(--ink); }
+.c.hit { background: var(--hit); color: var(--hit-ink); font-weight: 600; }
+.c.peer, .sector .s.peer { background: var(--panel); box-shadow: inset 0 0 0 2px var(--hit); color: var(--hit); outline: none; }
+.c.peer { background: transparent; border: 2px dashed var(--hit); box-shadow: none; }
+.sector .s.peer { border: 2px dashed var(--hit); box-shadow: none; }
+.axis { font: 500 0.6rem var(--font-mono); color: var(--muted); display: grid; place-items: center; width: 26px; height: 18px; }
+.rowlab { width: 30px; height: 26px; font: 500 0.6rem var(--font-mono); color: var(--muted); display: flex; align-items: center; }
+
+.strip { display: flex; gap: 0; width: max-content; }
+.sector { display: flex; gap: 2px; padding: 4px; border-radius: 4px; position: relative; }
+.sector:nth-child(odd) { background: var(--sector-a); }
+.sector:nth-child(even) { background: var(--sector-b); }
+.sector.fetched { box-shadow: inset 0 0 0 2px var(--hit); }
+.sector .s {
+  width: 20px; height: 26px; border-radius: 2px; background: var(--panel);
+  display: grid; place-items: center; font: 500 0.56rem var(--font-mono); color: var(--muted);
+  transition: background-color 0.18s, color 0.18s;
+}
+.sector .s.trail { background: var(--trail); color: var(--ink); }
+.sector .s.hit { background: var(--hit); color: var(--hit-ink); font-weight: 600; }
+.addr { display: flex; width: max-content; }
+.addr { margin-top: 3px; }
+.addr span { font: 400 0.62rem var(--font-mono); color: var(--muted); line-height: 1.4; flex: none; }
+.note { font-size: 0.86rem; color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.82rem; color: var(--muted); align-items: center; }
+.sw { display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: -2px; margin-right: 6px; }
+
+.compare { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.compare th, .compare td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.compare th { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.05em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+.compare td.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.keys { font-size: 0.82rem; color: var(--muted); align-self: center; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+kbd { font: 600 0.78rem var(--font-mono); background: var(--code-bg); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; color: var(--ink); }
+.takeaways { display: flex; flex-direction: column; gap: 10px; }
+.takeaways p { padding-left: 14px; border-left: 2px solid var(--line); }
+@media (prefers-reduced-motion: reduce) { .c, .sector .s { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header style="display:flex;flex-direction:column;gap:10px">
+    <div class="eyebrow">Naive matmul kernel · memory access</div>
+    <h1>Why <code>arr2</code> is coalesced even though the loop walks down a column</h1>
+    <p class="lede">Each thread does walk down a column of B over time. Coalescing does not look at that. It looks at the addresses that all threads of a warp request in the <em>same</em> instruction, at the same loop step <code>i</code>. Switch between the two views below and watch the memory row at the bottom of each panel.</p>
+  </header>
+
+  <section class="controls" aria-label="Diagram controls">
+    <div class="ctl">
+      <span class="lbl" id="lbl-view">What to show</span>
+      <div class="seg" role="group" aria-labelledby="lbl-view">
+        <button id="v-thread" type="button" aria-pressed="false">One thread, over time</button>
+        <button id="v-warp" type="button" aria-pressed="true">Whole warp, one step</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <span class="lbl" id="lbl-map">threadIdx.x indexes</span>
+      <div class="seg" role="group" aria-labelledby="lbl-map">
+        <button id="m-col" type="button" aria-pressed="true">the column (your kernel)</button>
+        <button id="m-row" type="button" aria-pressed="false">the row</button>
+      </div>
+    </div>
+    <div class="ctl">
+      <label for="step">Loop step i</label>
+      <div class="steprow">
+        <input id="step" type="range" min="0" max="5" value="0">
+        <span class="val" id="step-val">0</span>
+        <button class="btn" id="play" type="button">Play</button>
+      </div>
+    </div>
+    <div class="ctl" id="thread-ctl" hidden>
+      <label for="thread">Thread</label>
+      <div class="steprow">
+        <input id="thread" type="range" min="0" max="7" value="3">
+        <span class="val" id="thread-val">t3</span>
+      </div>
+    </div>
+    <div class="keys" aria-label="Keyboard shortcuts">
+      <span><kbd>←</kbd> <kbd>→</kbd> step i</span>
+      <span id="keys-thread" hidden><kbd>↑</kbd> <kbd>↓</kbd> change thread</span>
+    </div>
+  </section>
+
+  <pre class="code" id="code"></pre>
+
+  <div class="explain" id="explain"></div>
+
+  <div class="legend">
+    <span><span class="sw" style="background:var(--hit)"></span>read at this step</span>
+    <span id="lg-trail"><span class="sw" style="background:var(--trail)"></span>this thread, earlier steps</span>
+    <span id="lg-peer"><span class="sw" style="border:2px dashed var(--hit)"></span>other threads, same step</span>
+    <span><span class="sw" style="background:transparent;box-shadow:inset 0 0 0 2px var(--hit)"></span>32-byte sector the GPU must fetch</span>
+    <span class="mono">t0…t7 = which thread</span>
+  </div>
+
+  <div class="panels" id="panels"></div>
+
+  <section style="display:flex;flex-direction:column;gap:12px">
+    <h2>Sectors fetched per warp, per loop step</h2>
+    <p class="note">Toy sizes from the diagram: 8 threads, A is 8×6, B is 6×8, C is 8×8, one sector = 8 floats (32 bytes). Fewer sectors for the same work is better.</p>
+    <div class="scroll">
+      <table class="compare">
+        <thead><tr><th>Access</th><th>threadIdx.x → column</th><th>threadIdx.x → row</th></tr></thead>
+        <tbody id="cmp"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="takeaways">
+    <h2>What to take away</h2>
+    <p><strong>CPU:</strong> there is one thread, so what matters is how its addresses change from one loop step to the next. That is why <code>matrix_cpu.c</code> uses the i-k-j order.</p>
+    <p><strong>GPU:</strong> a warp runs the loop in lockstep. At each step, the hardware gathers the 32 addresses from one load instruction and fetches every 32-byte sector they touch. What matters is how the address changes from one <em>thread</em> to the next.</p>
+    <p>With <code>threadIdx.x</code> on the column, neighbouring threads read neighbouring columns of the same row of B: one contiguous run. Over time each thread moves down a row, so the warp sweeps B one full row per step. A is the same element for every thread with the same row, so it is a broadcast.</p>
+    <p>The diagram uses 8 threads per row to stay readable. In the real kernel a warp is 32 threads: 16 values of <code>threadIdx.x</code> for each of 2 values of <code>threadIdx.y</code>, with 16×16 blocks. The pattern is the same.</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  const M = 8, N = 6, L = 8, T = 8, FIXED = 2, SECTOR = 8;
+  const st = { view: "warp", map: "col", i: 0, t: 3, timer: null };
+  const $ = (id) => document.getElementById(id);
+
+  // row/col of the output element owned by thread t
+  function owner(t) { return st.map === "col" ? { row: FIXED, col: t } : { row: t, col: FIXED }; }
+
+  // address each thread touches, per array, at step k
+  function addrs(arr, t, k) {
+    const { row, col } = owner(t);
+    if (arr === "A") return row * N + k;
+    if (arr === "B") return k * L + col;
+    return row * L + col; // C store
+  }
+
+  const ARRAYS = [
+    { key: "A", name: "A  (arr1)", rows: M, cols: N, expr: (m) => m === "col" ? "arr1[row*N + i]" : "arr1[row*N + i]   with row = threadIdx.x" },
+    { key: "B", name: "B  (arr2)", rows: N, cols: L, expr: (m) => m === "col" ? "arr2[i*L + col]" : "arr2[i*L + col]   with col = threadIdx.y" },
+    { key: "C", name: "C  (sol), written once after the loop", rows: M, cols: L, expr: () => "sol[row*L + col]" },
+  ];
+
+  function warpAccess(arr, k) {
+    const m = new Map();
+    for (let t = 0; t < T; t++) {
+      const a = addrs(arr, t, k);
+      if (!m.has(a)) m.set(a, []);
+      m.get(a).push(t);
+    }
+    return m; // addr -> [threads]
+  }
+
+  function classify(addrList) {
+    const u = [...new Set(addrList)].sort((a, b) => a - b);
+    if (u.length === 1) return { kind: "broadcast", label: "broadcast: all threads read 1 address" };
+    const d = u[1] - u[0];
+    const even = u.every((v, j) => j === 0 || v - u[j - 1] === d);
+    if (even && d === 1) return { kind: "contiguous", label: "contiguous: neighbours read neighbours" };
+    return { kind: "strided", label: `strided: neighbours ${d} floats apart` };
+  }
+
+  function sectorsOf(addrList) { return new Set(addrList.map((a) => Math.floor(a / SECTOR))).size; }
+
+  function renderCode() {
+    const col = st.map === "col";
+    const L1 = col
+      ? `int <span class="hl">col</span> = blockIdx.x*blockDim.x + <span class="hl">threadIdx.x</span>;   <span class="cm">// x -> column</span>`
+      : `int <span class="hl">row</span> = blockIdx.x*blockDim.x + <span class="hl">threadIdx.x</span>;   <span class="cm">// x -> row</span>`;
+    const L2 = col
+      ? `int row = blockIdx.y*blockDim.y + threadIdx.y;   <span class="cm">// y -> row</span>`
+      : `int col = blockIdx.y*blockDim.y + threadIdx.y;   <span class="cm">// y -> column</span>`;
+    $("code").innerHTML =
+      L1 + "\n" + L2 + "\n" +
+      `for (int i = 0; i &lt; N; i++)\n` +
+      `    sum += arr1[row*N + i] * arr2[i*L + col];\n` +
+      `sol[row*L + col] = sum;`;
+  }
+
+  function renderExplain() {
+    const e = $("explain");
+    if (st.view === "thread") {
+      const { row, col } = owner(st.t);
+      e.innerHTML =
+        `<h3>Thread t${st.t} on its own (row ${row}, col ${col}), steps 0 to ${st.i}</h3>` +
+        `<p>The solid cell and its light-blue trail are t${st.t} alone. In B it moves <strong>${L} floats</strong> per step, down its column. That jump is real, but it is the jump <em>between two different load instructions</em>, and the hardware never combines those.</p>` +
+        `<p>The <strong>dashed cells</strong> are the other threads of the warp, reading at the <em>same</em> step. These are what get combined into one memory request. ` +
+        (st.map === "col"
+          ? `In B they fill the rest of row ${st.i}, so t${st.t} and its neighbours together read one contiguous run: 1 sector. Press → and watch the whole row move down together.</p>`
+          : `Here neighbouring threads own neighbouring rows, so in A and C the dashed cells are spread across many sectors.</p>`);
+    } else {
+      const b = classify([...warpAccess("B", st.i).keys()]);
+      e.innerHTML =
+        `<h3>All ${T} threads at step i = ${st.i}, as the hardware sees one load instruction</h3>` +
+        (st.map === "col"
+          ? `<p>Every thread reads B at the same step <code>i</code>, but each owns a different <strong>column</strong>. So together they read <strong>row ${st.i} of B</strong> from left to right, and in memory that is one contiguous run (${b.label.split(":")[0]}). Each thread still walks down a column over time, but at any one moment the warp is reading across a row.</p>`
+          : `<p>Now neighbouring threads own neighbouring <strong>rows</strong>. Their reads of A are ${N} floats apart and the stores to C are ${L} floats apart, so the warp touches many separate sectors. B became a broadcast, which does not make up for the scattered accesses.</p>`);
+    }
+  }
+
+  function renderPanels() {
+    const host = $("panels");
+    host.innerHTML = "";
+    for (const A of ARRAYS) {
+      const total = A.rows * A.cols;
+      const hits = new Map();   // addr -> label
+      const trail = new Set();
+      const peers = new Map();  // addr -> label, other threads at the same step (thread view)
+      let addrList = [];
+
+      if (st.view === "warp") {
+        const k = A.key === "C" ? 0 : st.i;
+        const wa = warpAccess(A.key, k);
+        for (const [a, ts] of wa) hits.set(a, ts.length === T ? "all" : ts.length > 1 ? "×" + ts.length : "t" + ts[0]);
+        addrList = [...wa.keys()];
+      } else {
+        const k = A.key === "C" ? 0 : st.i;
+        if (A.key !== "C")
+          for (let kk = 0; kk < st.i; kk++) trail.add(addrs(A.key, st.t, kk));
+        const mine = addrs(A.key, st.t, k);
+        hits.set(mine, "t" + st.t);
+        const wa = warpAccess(A.key, k);
+        for (const [a, ts] of wa) {
+          if (a === mine) { if (ts.length > 1) hits.set(a, ts.length === T ? "all" : "×" + ts.length); }
+          else peers.set(a, ts.length > 1 ? "×" + ts.length : "t" + ts[0]);
+        }
+        addrList = [...wa.keys()];
+      }
+      const fetched = new Set(addrList.map((a) => Math.floor(a / SECTOR)));
+
+      const panel = document.createElement("section");
+      panel.className = "panel";
+
+      // header + badges
+      let badges = "";
+      if (st.view === "warp") {
+        const c = classify(addrList);
+        const s = sectorsOf(addrList);
+        const good = s <= 2;
+        badges = `<span class="badge ${c.kind === "strided" ? "bad" : "good"}">${c.label}</span>` +
+                 `<span class="badge ${good ? "good" : "bad"}">${s} sector${s > 1 ? "s" : ""} fetched</span>`;
+      } else {
+        const s = sectorsOf(addrList);
+        const step = A.key === "A" ? 1 : L;
+        badges = (A.key === "C"
+          ? `<span class="badge neutral">one store after the loop</span>`
+          : `<span class="badge neutral">t${st.t} alone: +${step} float${step > 1 ? "s" : ""} per step</span>`) +
+          `<span class="badge ${s <= 2 ? "good" : "bad"}">whole warp at this step: ${s} sector${s > 1 ? "s" : ""}</span>`;
+      }
+      panel.innerHTML =
+        `<div class="panel-head"><div style="display:flex;flex-direction:column;gap:2px"><h3>${A.name}</h3>` +
+        `<span class="expr">${A.expr(st.map)}</span></div><div class="badges">${badges}</div></div>`;
+
+      const body = document.createElement("div");
+      body.className = "panel-body";
+
+      // 2-D view
+      const left = document.createElement("div");
+      left.className = "scroll";
+      left.innerHTML = `<div class="sub">As a matrix (${A.rows}×${A.cols})</div>`;
+      const g = document.createElement("div");
+      g.className = "grid2d";
+      g.style.gridTemplateColumns = `30px repeat(${A.cols}, 26px)`;
+      g.appendChild(Object.assign(document.createElement("div"), { className: "axis" }));
+      for (let c = 0; c < A.cols; c++) g.appendChild(Object.assign(document.createElement("div"), { className: "axis", textContent: "c" + c }));
+      for (let r = 0; r < A.rows; r++) {
+        g.appendChild(Object.assign(document.createElement("div"), { className: "rowlab", textContent: "r" + r }));
+        for (let c = 0; c < A.cols; c++) {
+          const a = r * A.cols + c;
+          const d = document.createElement("div");
+          d.className = "c" + (hits.has(a) ? " hit" : peers.has(a) ? " peer" : trail.has(a) ? " trail" : "");
+          d.textContent = hits.get(a) || peers.get(a) || "";
+          g.appendChild(d);
+        }
+      }
+      left.appendChild(g);
+
+      // 1-D memory view
+      const right = document.createElement("div");
+      right.className = "scroll";
+      right.innerHTML = `<div class="sub">In memory, row-major (addresses 0–${total - 1}); boxes = 32-byte sectors</div>`;
+      const strip = document.createElement("div");
+      strip.className = "strip";
+      for (let s = 0; s < total / SECTOR; s++) {
+        const sec = document.createElement("div");
+        sec.className = "sector" + (fetched.has(s) ? " fetched" : "");
+        sec.title = `sector ${s}: addresses ${s * SECTOR}–${s * SECTOR + SECTOR - 1}`;
+        for (let j = 0; j < SECTOR; j++) {
+          const a = s * SECTOR + j;
+          const d = document.createElement("div");
+          d.className = "s" + (hits.has(a) ? " hit" : peers.has(a) ? " peer" : trail.has(a) ? " trail" : "");
+          d.textContent = hits.get(a) || peers.get(a) || "";
+          d.title = `address ${a} = [r${Math.floor(a / A.cols)}][c${a % A.cols}]`;
+          sec.appendChild(d);
+        }
+        strip.appendChild(sec);
+      }
+      right.appendChild(strip);
+      const lab = document.createElement("div");
+      lab.className = "addr";
+      lab.innerHTML = [...Array(total / SECTOR).keys()].map((s) =>
+        `<span style="width:${SECTOR * 22 + 8}px;padding-left:4px">${s * SECTOR}</span>`).join("");
+      right.appendChild(lab);
+
+      body.append(left, right);
+      panel.appendChild(body);
+      host.appendChild(panel);
+    }
+  }
+
+  function renderCompare() {
+    const save = st.map, rows = [];
+    for (const key of ["A", "B", "C"]) {
+      const out = [];
+      for (const m of ["col", "row"]) {
+        st.map = m;
+        const list = [...warpAccess(key, 0).keys()];
+        out.push(`${sectorsOf(list)} · ${classify(list).kind}`);
+      }
+      rows.push(`<tr><td class="mono">${key === "A" ? "A (arr1) load" : key === "B" ? "B (arr2) load" : "C (sol) store"}</td><td class="num">${out[0]}</td><td class="num">${out[1]}</td></tr>`);
+    }
+    st.map = save;
+    $("cmp").innerHTML = rows.join("");
+  }
+
+  function render() {
+    $("v-thread").setAttribute("aria-pressed", st.view === "thread");
+    $("v-warp").setAttribute("aria-pressed", st.view === "warp");
+    $("m-col").setAttribute("aria-pressed", st.map === "col");
+    $("m-row").setAttribute("aria-pressed", st.map === "row");
+    $("thread-ctl").hidden = st.view !== "thread";
+    $("lg-trail").hidden = st.view !== "thread";
+    $("keys-thread").hidden = st.view !== "thread";
+    $("lg-peer").hidden = st.view !== "thread";
+    $("step-val").textContent = st.i;
+    $("thread-val").textContent = "t" + st.t;
+    renderCode(); renderExplain(); renderPanels();
+  }
+
+  function stop() { if (st.timer) { clearInterval(st.timer); st.timer = null; $("play").textContent = "Play"; } }
+
+  $("v-thread").onclick = () => { st.view = "thread"; render(); };
+  $("v-warp").onclick = () => { st.view = "warp"; render(); };
+  $("m-col").onclick = () => { st.map = "col"; render(); };
+  $("m-row").onclick = () => { st.map = "row"; render(); };
+  $("step").oninput = (e) => { stop(); st.i = +e.target.value; render(); };
+  $("thread").oninput = (e) => { st.t = +e.target.value; render(); };
+  $("play").onclick = () => {
+    if (st.timer) return stop();
+    $("play").textContent = "Pause";
+    st.timer = setInterval(() => { st.i = (st.i + 1) % N; $("step").value = st.i; render(); }, 1100);
+  };
+
+  // Arrow keys: left/right step through i, up/down change thread (thread view).
+  // A focused slider already handles arrows itself, so leave those events alone.
+  document.addEventListener("keydown", (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    if (e.target instanceof HTMLInputElement && e.target.type === "range") return;
+    if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      stop();
+      st.i = (st.i + (e.key === "ArrowRight" ? 1 : N - 1)) % N;
+      $("step").value = st.i;
+    } else if ((e.key === "ArrowUp" || e.key === "ArrowDown") && st.view === "thread") {
+      st.t = Math.min(T - 1, Math.max(0, st.t + (e.key === "ArrowUp" ? 1 : -1)));
+      $("thread").value = st.t;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    render();
+  });
+
+  renderCompare();
+  render();
+})();
+</script>

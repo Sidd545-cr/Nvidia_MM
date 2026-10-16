@@ -1,0 +1,7 @@
+tests/__pycache__
+tests/*.csv
+tests/*.md
+ignore/
+build/
+tests/cases/
+__pycache__/
