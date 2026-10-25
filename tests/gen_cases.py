@@ -15,7 +15,7 @@ program, so CPU and GPU errors are both measured against the same truth.
 
 Usage:
     python3 tests/gen_cases.py              generate all default cases
-    python3 tests/gen_cases.py --large      also the 1024^3 case
+    python3 tests/gen_cases.py --large      also the large cases (1024^3, 2048x512x4096, 2048^3)
     python3 tests/gen_cases.py --list       list cases without generating
     python3 tests/gen_cases.py --only tall  generate one case
 """
@@ -50,6 +50,8 @@ CASES = [
 ]
 LARGE_CASES = [
     ("square_1024", 1024, 1024, 1024, "medium square (slow reference)"),
+    ("rect_2048x512x4096", 2048, 512, 4096, "rectangular output (spec benchmark shape)"),
+    ("square_2048", 2048, 2048, 2048, "large square (~2 min to generate)"),
 ]
 
 
@@ -108,7 +110,7 @@ def selected_cases(large=False, only=None):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[1])
-    p.add_argument("--large", action="store_true", help="include the 1024^3 case")
+    p.add_argument("--large", action="store_true", help="include the large cases")
     p.add_argument("--only", nargs="+", metavar="NAME", help="generate only these cases")
     p.add_argument("--force", action="store_true", help="regenerate even if up to date")
     p.add_argument("--list", action="store_true", help="list the cases and exit")
@@ -117,14 +119,14 @@ def main():
     cases = selected_cases(args.large, args.only)
     if args.list:
         for name, M, N, L, desc in CASES + LARGE_CASES:
-            print(f"  {name:<13} {M:>5} x {N:>5} x {L:>5}   {desc}")
+            print(f"  {name:<19} {M:>5} x {N:>5} x {L:>5}   {desc}")
         return
 
     for name, M, N, L, desc in cases:
         t0 = time.monotonic()
         made = generate(name, M, N, L, args.force)
         status = f"generated in {time.monotonic() - t0:.1f}s" if made else "up to date"
-        print(f"  {name:<13} {M}x{N}x{L:<6} {status}")
+        print(f"  {name:<19} {M}x{N}x{L:<6} {status}")
 
 
 if __name__ == "__main__":
